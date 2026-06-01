@@ -5,12 +5,16 @@ edition.workspace = true
 
 [dependencies]
 udp-lb-common = { path = "../udp-lb-common" }
+network-types = "0.0.5"
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 
 [build-dependencies]
 which = { workspace = true }
+
+[target.bpfel-unknown-none]
+linker = "bpf-linker"
 
 [[bin]]
 name = "udp-lb"
