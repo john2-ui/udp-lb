@@ -23,7 +23,7 @@ const LIP: u32 = 0x0A0000FE; // 10.0.0.254 (网络字节序: 4261412874)
 
 //TODO: 添加日志功能
 #[map(name = "RING_LOOKUP_TABLE")]
-static mut RING_LOOKUP_TABLE: Array<BackendInfo> = Array::with_max_entries(RING_SIZE, 0);
+static RING_LOOKUP_TABLE: Array<BackendInfo> = Array::with_max_entries(RING_SIZE, 0);
 
 #[map(name = "CONNTRACK_FORWARD")]
 static CONNTRACK_FORWARD: LruHashMap<FlowKey, FlowValue> = LruHashMap::with_max_entries(65536, 0);
