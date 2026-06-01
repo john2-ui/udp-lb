@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "udp-lb",
-    "udp-lb-common",
-    "udp-lb-ebpf",
-]
+members = ["udp-lb", "udp-lb-common", "udp-lb-ebpf"]
 default-members = ["udp-lb", "udp-lb-common"]
 
 [workspace.package]
@@ -34,3 +30,11 @@ which = { version = "6.0.0", default-features = false }
 debug = 2
 codegen-units = 1
 strip = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
