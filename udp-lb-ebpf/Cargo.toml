@@ -1,0 +1,17 @@
+[package]
+name = "udp-lb-ebpf"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+udp-lb-common = { path = "../udp-lb-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "udp-lb"
+path = "src/main.rs"
