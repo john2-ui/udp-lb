@@ -19,3 +19,5 @@ linker = "bpf-linker"
 [[bin]]
 name = "udp-lb"
 path = "src/main.rs"
+test = false
+bench = false
