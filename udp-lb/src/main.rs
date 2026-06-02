@@ -49,7 +49,18 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     println!("Loading config from configy.yaml... ");
-    let config_file = fs::read_to_string("../config.yaml").context("Failed to read config.yaml")?;
+
+    // 动态获取当前可执行文件路径，并回退到项目根目录
+    let mut root_dir = std::env::current_exe().context("Failed to get current executable path")?;
+    root_dir.pop(); // 弹出可执行文件名 (udp-lb)
+    root_dir.pop(); // 弹出 release/
+    root_dir.pop(); // 弹出 target/
+
+    // 拼接配置文件的绝对路径
+    let config_path = root_dir.join("config.yaml");
+    println!("Using absolute config path: {:?}", config_path);
+
+    let config_file = fs::read_to_string(&config_path).context("Failed to read config.yaml")?;
     let app_config: AppConfig =
         serde_yaml::from_str(&config_file).context("Failed to parse YAML config")?;
     println!(
@@ -57,12 +68,13 @@ async fn main() -> anyhow::Result<()> {
         app_config.iface
     );
 
-    // 加载编译好的eBPF字节码
-    println!(
-        "Loading eBPF program from file: ../target/bpf-unknown-none/release/udp-lb, please check the path if it fails"
-    );
-    let mut bpf = Ebpf::load_file("../target/bpf-unknown-none/release/udp-lb")?;
-    print!("eBPF program loaded successfully. ");
+    // 复用 root_dir，拼接 eBPF 字节码的绝对路径
+    let ebpf_path = root_dir.join("target/bpfel-unknown-none/release/udp-lb");
+
+    println!("Loading eBPF program from file: {:?}", ebpf_path);
+    let mut bpf = aya::Ebpf::load_file(&ebpf_path)
+        .context(format!("Failed to load eBPF bytecode at {:?}", ebpf_path))?;
+    println!("eBPF program loaded successfully.");
 
     // 挂载 XDP 程序到指定网络接口
     let iface = &app_config.iface;

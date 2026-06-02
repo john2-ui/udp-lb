@@ -5,7 +5,7 @@
 在udp-lb-ebpf目录下执行以下命令，输出目录为target/bpfel-unknown-none/release/udp-lb
 
 ```bash
-rustup toolchain install nightly --component rust-src
+cargo +nightly build --release
 ```
 
 ## 用户态程序编译命令
@@ -15,3 +15,4 @@ rustup toolchain install nightly --component rust-src
 ```bash
 cargo build --release
 ```
+<!-- TODO: 添加网路沙盒配置脚本-->
