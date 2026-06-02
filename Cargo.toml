@@ -25,6 +25,8 @@ libc = { version = "0.2.159", default-features = false }
 log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
+serde = { version = "1.0", features = ["derive"], default-features = false }
+serde_yaml = { version = "0.9", default-features = false }
 
 [profile.release.package.udp-lb-ebpf]
 debug = 2

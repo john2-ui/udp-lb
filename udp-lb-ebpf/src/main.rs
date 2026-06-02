@@ -18,17 +18,16 @@ use network_types::{
     ip::{IpProto, Ipv4Hdr},
     udp::UdpHdr,
 };
-use udp_lb_common::{BackendInfo, FlowKey, FlowValue};
+use udp_lb_common::{BackendInfo, FlowKey, FlowValue, LbConfig};
 
-//TODO: 添加读取配置文件功能
-// 常量定义
-const RING_SIZE: u32 = 1024;
-const VIP: u32 = 0x0A000001; // 10.0.0.1 (网络字节序: 16777226)
-const LIP: u32 = 0x0A0000FE; // 10.0.0.254 (网络字节序: 4261412874)
+// 定义支持的最大哈希环大小，编译期常量
+const MAX_RING_SIZE: u32 = 4096;
 
-//TODO: 添加日志功能
+#[map(name = "CONFIG_MAP")]
+static CONFIG_MAP: Array<LbConfig> = Array::with_max_entries(1, 0);
+
 #[map(name = "RING_LOOKUP_TABLE")]
-static RING_LOOKUP_TABLE: Array<BackendInfo> = Array::with_max_entries(RING_SIZE, 0);
+static RING_LOOKUP_TABLE: Array<BackendInfo> = Array::with_max_entries(MAX_RING_SIZE, 0);
 
 #[map(name = "CONNTRACK_FORWARD")]
 static CONNTRACK_FORWARD: LruHashMap<FlowKey, FlowValue> = LruHashMap::with_max_entries(65536, 0);
@@ -46,6 +45,12 @@ pub fn xpd_fullnat_lb(ctx: XdpContext) -> u32 {
 
 #[inline(always)]
 fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
+    // 读取配置
+    let config = CONFIG_MAP.get(0).ok_or(())?;
+    let vip = config.vip;
+    let lip = config.lip;
+    let ring_size = config.ring_size;
+
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0)?;
     let ether_type = unsafe { core::ptr::addr_of!(eth.ether_type).read_unaligned() };
     if ether_type != EtherType::Ipv4 {
@@ -65,7 +70,7 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
     let dst_port = udp.dest;
 
     //TODO: 添加DSR功能（通过配置文件选择），这里实现的是Full NAT
-    if dst_ip == u32::to_be(VIP) {
+    if dst_ip == u32::to_be(vip) {
         //TODO: 负载均衡算法 + 修改包头
         let fwd_key = FlowKey {
             ip: src_ip,
@@ -78,7 +83,7 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
                 *cached
             } else {
                 let hash = calculate_hash(u32::from_be(src_ip), u16::from_be(src_port));
-                let slot = hash % RING_SIZE;
+                let slot = hash % ring_size;
 
                 let rs = RING_LOOKUP_TABLE.get(slot).ok_or(())?;
                 let new_value = FlowValue {
@@ -108,7 +113,7 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         };
 
         // 修改包头
-        ipv4.src_addr = u32::to_be(LIP);
+        ipv4.src_addr = u32::to_be(lip);
         ipv4.dst_addr = backend.target_ip;
         udp.source = src_port; //TODO: 这里是简易实现：直接复用源端口作为Port，实际可能存在冲突，可以改成一个端口池
         udp.dest = backend.target_port;
@@ -120,7 +125,7 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         udp.check = 0;
 
         return Ok(xdp_action::XDP_TX);
-    } else if dst_ip == u32::to_be(LIP) {
+    } else if dst_ip == u32::to_be(lip) {
         // RS发出的回向包
         let rev_key = FlowKey {
             ip: src_ip,
@@ -130,7 +135,7 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
 
         if let Some(orig_flow) = unsafe { CONNTRACE_REVERSE.get(&rev_key) } {
             // 修改包头
-            ipv4.src_addr = u32::to_be(VIP);
+            ipv4.src_addr = u32::to_be(vip);
             ipv4.dst_addr = orig_flow.target_ip;
             udp.source = dst_port;
             udp.dest = orig_flow.target_port;

@@ -27,3 +27,12 @@ pub struct FlowValue {
     pub target_port: u16,
     pub target_mac: [u8; 6],
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LbConfig {
+    pub vip: u32,
+    pub lip: u32,
+    pub ring_size: u32,
+    pub _pad: [u8; 4], //填充到4字节对齐
+}

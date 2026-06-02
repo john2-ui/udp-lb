@@ -22,6 +22,8 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 clap = { workspace = true, features = ["derive"] }
+serde.workspace = true
+serde_yaml.workspace = true
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }
