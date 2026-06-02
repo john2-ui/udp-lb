@@ -76,7 +76,6 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
 
     //TODO: 添加DSR功能（通过配置文件选择），这里实现的是Full NAT
     if dst_ip == u32::to_be(vip) {
-        //TODO: 负载均衡算法 + 修改包头
         let fwd_key = FlowKey {
             ip: src_ip,
             port: src_port,
@@ -100,6 +99,14 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
                 // 写入正向表
                 let _ = CONNTRACK_FORWARD.insert(&fwd_key, &new_value, 0);
 
+                let mut client_mac = [0u8; 6];
+                client_mac[0] = eth.src_addr[0];
+                client_mac[1] = eth.src_addr[1];
+                client_mac[2] = eth.src_addr[2];
+                client_mac[3] = eth.src_addr[3];
+                client_mac[4] = eth.src_addr[4];
+                client_mac[5] = eth.src_addr[5];
+
                 // 写入反向表
                 let rev_key = FlowKey {
                     ip: rs.ip,
@@ -109,7 +116,7 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
                 let rev_value = FlowValue {
                     target_ip: src_ip,
                     target_port: src_port,
-                    target_mac: eth.src_addr, // 记录客户端/网关MAC地址，回向包时直接使用
+                    target_mac: client_mac, // 记录客户端/网关MAC地址，回向包时直接使用
                 };
                 let _ = CONNTRACE_REVERSE.insert(&rev_key, &rev_value, 0);
 
@@ -122,8 +129,14 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         ipv4.dst_addr = backend.target_ip;
         udp.source = src_port; //TODO: 这里是简易实现：直接复用源端口作为Port，实际可能存在冲突，可以改成一个端口池
         udp.dest = backend.target_port;
-        eth.dst_addr = backend.target_mac;
 
+        eth.dst_addr[0] = backend.target_mac[0];
+        eth.dst_addr[1] = backend.target_mac[1];
+        eth.dst_addr[2] = backend.target_mac[2];
+        eth.dst_addr[3] = backend.target_mac[3];
+        eth.dst_addr[4] = backend.target_mac[4];
+        eth.dst_addr[5] = backend.target_mac[5];
+       
         // 重新计算校验和
         ipv4.check = 0;
         ipv4.check = compute_ipv4_checksum(ipv4);
@@ -144,7 +157,13 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
             ipv4.dst_addr = orig_flow.target_ip;
             udp.source = dst_port;
             udp.dest = orig_flow.target_port;
-            eth.dst_addr = orig_flow.target_mac;
+
+            eth.dst_addr[0] = orig_flow.target_mac[0];
+            eth.dst_addr[1] = orig_flow.target_mac[1];
+            eth.dst_addr[2] = orig_flow.target_mac[2];
+            eth.dst_addr[3] = orig_flow.target_mac[3];
+            eth.dst_addr[4] = orig_flow.target_mac[4];
+            eth.dst_addr[5] = orig_flow.target_mac[5];
 
             ipv4.check = 0;
             ipv4.check = compute_ipv4_checksum(ipv4);
@@ -199,7 +218,9 @@ fn compute_ipv4_checksum(ipv4: &Ipv4Hdr) -> u16 {
     for i in 0..(Ipv4Hdr::LEN / 2) {
         csum = csum.wrapping_add(unsafe { ptr.add(i).read_unaligned() } as u32);
     }
-    !(csum.wrapping_add(csum >> 16) as u16)
+    csum = (csum & 0xffff) + (csum >> 16);
+    csum = (csum & 0xffff) + (csum >> 16);
+    !(csum as u16)
 }
 
 #[inline(always)]

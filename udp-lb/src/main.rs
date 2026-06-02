@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
     // 挂载 XDP 程序到指定网络接口
     let iface = &app_config.iface;
     let program: &mut Xdp = bpf
-        .program_mut("xpd_fullnat_lb")
+        .program_mut("xdp_fullnat_lb")
         .context("failed to find xdp program")?
         .try_into()?;
     program.load()?;
