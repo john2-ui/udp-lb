@@ -75,7 +75,7 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
     let dst_port = udp.dest;
 
     //TODO: 添加DSR功能（通过配置文件选择），这里实现的是Full NAT
-    if dst_ip == u32::to_be(vip) {
+    if dst_ip == vip {
         let fwd_key = FlowKey {
             ip: src_ip,
             port: src_port,
@@ -125,7 +125,7 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         };
 
         // 修改包头
-        ipv4.src_addr = u32::to_be(lip);
+        ipv4.src_addr = lip;
         ipv4.dst_addr = backend.target_ip;
         udp.source = src_port; //TODO: 这里是简易实现：直接复用源端口作为Port，实际可能存在冲突，可以改成一个端口池
         udp.dest = backend.target_port;
@@ -136,14 +136,14 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         eth.dst_addr[3] = backend.target_mac[3];
         eth.dst_addr[4] = backend.target_mac[4];
         eth.dst_addr[5] = backend.target_mac[5];
-       
+
         // 重新计算校验和
         ipv4.check = 0;
         ipv4.check = compute_ipv4_checksum(ipv4);
         udp.check = 0;
 
         return Ok(xdp_action::XDP_TX);
-    } else if dst_ip == u32::to_be(lip) {
+    } else if dst_ip == lip {
         // RS发出的回向包
         let rev_key = FlowKey {
             ip: src_ip,
@@ -153,7 +153,7 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
 
         if let Some(orig_flow) = unsafe { CONNTRACE_REVERSE.get(&rev_key) } {
             // 修改包头
-            ipv4.src_addr = u32::to_be(vip);
+            ipv4.src_addr = vip;
             ipv4.dst_addr = orig_flow.target_ip;
             udp.source = dst_port;
             udp.dest = orig_flow.target_port;
