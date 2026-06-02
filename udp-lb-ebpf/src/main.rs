@@ -36,20 +36,25 @@ static CONNTRACK_FORWARD: LruHashMap<FlowKey, FlowValue> = LruHashMap::with_max_
 static CONNTRACE_REVERSE: LruHashMap<FlowKey, FlowValue> = LruHashMap::with_max_entries(65536, 0);
 
 #[xdp]
-pub fn xpd_fullnat_lb(ctx: XdpContext) -> u32 {
-    match try_xpd_fullnat_lb(ctx) {
+pub fn xdp_fullnat_lb(ctx: XdpContext) -> u32 {
+    match try_xdp_fullnat_lb(ctx) {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_PASS,
     }
 }
 
 #[inline(always)]
-fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
+fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
     // 读取配置
     let config = CONFIG_MAP.get(0).ok_or(())?;
     let vip = config.vip;
     let lip = config.lip;
     let ring_size = config.ring_size;
+    let hash_seed = config.hash_seed;
+
+    if ring_size == 0 || ring_size > MAX_RING_SIZE {
+        return Err(());
+    }
 
     let eth = ptr_at_mut::<EthHdr>(&ctx, 0)?;
     let ether_type = unsafe { core::ptr::addr_of!(eth.ether_type).read_unaligned() };
@@ -82,7 +87,7 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
             if let Some(cached) = CONNTRACK_FORWARD.get(&fwd_key) {
                 *cached
             } else {
-                let hash = calculate_hash(u32::from_be(src_ip), u16::from_be(src_port));
+                let hash = calculate_hash(u32::from_be(src_ip), u16::from_be(src_port), hash_seed);
                 let slot = hash % ring_size;
 
                 let rs = RING_LOOKUP_TABLE.get(slot).ok_or(())?;
@@ -151,14 +156,40 @@ fn try_xpd_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
     Ok(xdp_action::XDP_PASS)
 }
 
+// Jenkins Hash(动态加密)
 #[inline(always)]
-fn calculate_hash(ip: u32, port: u16) -> u32 {
-    // TODO: 可以替换成更好的一致性哈希算法，目前是简易实现
-    // FNV-1a hash
-    let mut hash = 2166136261u32;
-    hash = (hash ^ ip).wrapping_mul(16777619);
-    hash = (hash ^ (port as u32)).wrapping_mul(16777619);
-    hash
+fn calculate_hash(ip: u32, port: u16, seed: u32) -> u32 {
+    let jh_magic = 0xdeadbeefu32;
+    let length = 6u32; //IP(4) + Port(2) = 6字节
+
+    // 初始化内部状态
+    let mut a = ip
+        .wrapping_add(jh_magic)
+        .wrapping_add(length)
+        .wrapping_add(seed);
+    let mut b = (port as u32)
+        .wrapping_add(jh_magic)
+        .wrapping_add(length)
+        .wrapping_add(seed);
+    let mut c = jh_magic.wrapping_add(length).wrapping_add(seed);
+
+    // Jenkins 原生的核心混淆宏 (mix)
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(14));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(11));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(25));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(16));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(4));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(14));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(24));
+
+    c
 }
 
 #[inline(always)]

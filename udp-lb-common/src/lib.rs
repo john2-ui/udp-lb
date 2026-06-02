@@ -34,5 +34,5 @@ pub struct LbConfig {
     pub vip: u32,
     pub lip: u32,
     pub ring_size: u32,
-    pub _pad: [u8; 4], //填充到4字节对齐
+    pub hash_seed: u32,
 }

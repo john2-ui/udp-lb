@@ -2,10 +2,10 @@ use std::{fs, net::Ipv4Addr, str::FromStr};
 
 use anyhow::{Context, Result};
 use aya::{
-    Ebpf,
     maps::Array,
     programs::{Xdp, XdpMode},
 };
+use rand::Rng;
 use serde::Deserialize;
 use tokio::signal;
 use udp_lb_common::{BackendInfo, LbConfig};
@@ -88,11 +88,14 @@ async fn main() -> anyhow::Result<()> {
     let mut config_map: Array<_, PodLbConfig> =
         Array::try_from(bpf.map_mut("CONFIG_MAP").unwrap())?;
 
+    // 生成一个随机的u32作为哈希种子
+    let mut rng = rand::thread_rng();
+    let dynamic_seed: u32 = rng.r#gen();
     let lb_config = LbConfig {
         vip: u32::from(Ipv4Addr::from_str(&app_config.vip)?).to_be(),
         lip: u32::from(Ipv4Addr::from_str(&app_config.lip)?).to_be(),
         ring_size: app_config.ring_size,
-        _pad: [0; 4],
+        hash_seed: dynamic_seed,
     };
     config_map.set(0, PodLbConfig(lb_config), 0)?;
     println!("Global constants (VIP/LIP) injected into eBPF.");
@@ -100,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ring_map: Array<_, PodBackendInfo> =
         Array::try_from(bpf.map_mut("RING_LOOKUP_TABLE").unwrap())?;
 
-    // 简单的槽位分配逻辑：将 1024 个槽位均分给现有的后端
+    // 简单的槽位分配逻辑：将 ring_size 个槽位均分给现有的后端
     // 实际生产中这里应使用带虚拟节点的一致性哈希算法 (如 Ketama) 计算槽位映射
     println!(
         "Populating Consistent Hash Ring ({} slots)...",
