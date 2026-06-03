@@ -76,14 +76,35 @@ async fn main() -> anyhow::Result<()> {
         .context(format!("Failed to load eBPF bytecode at {:?}", ebpf_path))?;
     println!("eBPF program loaded successfully.");
 
+    // 在init日志之前，先加载程序
+    {
+        let program: &mut Xdp = bpf
+            .program_mut("xdp_fullnat_lb")
+            .context("failed to find xdp program")?
+            .try_into()?;
+        program.load()?;
+    }
+
+    // 初始化 eBPF 日志读取通道（需要在load()和attach()之间）
+    // 把内核数据流日志打印到用户态控制台中
+    if let Err(e) = aya_log::EbpfLogger::init(&mut bpf) {
+        eprintln!("Warning: Failed to initialize eBPF logger: {}", e);
+    } else {
+        println!("eBPF Logger initialized successfully. Listening for data-plane events...");
+    }
+
     // 挂载 XDP 程序到指定网络接口
     let iface = &app_config.iface;
+    println!("Attaching XDP program to interface: {}", iface);
+
     let program: &mut Xdp = bpf
         .program_mut("xdp_fullnat_lb")
         .context("failed to find xdp program")?
         .try_into()?;
-    program.load()?;
-    program.attach(iface, XdpMode::default()).context("failed to attach the XDP program with default mode - try changing XdpMode::default() to XdpMode::Skb")?;
+
+    program
+        .attach(iface, XdpMode::Skb)
+        .context("failed to attach the XDP program with Skb mode")?;
 
     let mut config_map: Array<_, PodLbConfig> =
         Array::try_from(bpf.map_mut("CONFIG_MAP").unwrap())?;

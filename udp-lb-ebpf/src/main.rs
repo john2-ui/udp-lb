@@ -13,6 +13,7 @@ use aya_ebpf::{
     maps::{Array, LruHashMap},
     programs::XdpContext,
 };
+use aya_log_ebpf::info;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
@@ -20,7 +21,6 @@ use network_types::{
 };
 use udp_lb_common::{BackendInfo, FlowKey, FlowValue, LbConfig};
 
-// 定义支持的最大哈希环大小，编译期常量
 const MAX_RING_SIZE: u32 = 4096;
 
 #[map(name = "CONFIG_MAP")]
@@ -37,45 +37,105 @@ static CONNTRACE_REVERSE: LruHashMap<FlowKey, FlowValue> = LruHashMap::with_max_
 
 #[xdp]
 pub fn xdp_fullnat_lb(ctx: XdpContext) -> u32 {
-    match try_xdp_fullnat_lb(ctx) {
+    match try_xdp_fullnat_lb(&ctx) {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_PASS,
     }
 }
 
 #[inline(always)]
-fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
-    // 读取配置
-    let config = CONFIG_MAP.get(0).ok_or(())?;
+fn try_xdp_fullnat_lb(ctx: &XdpContext) -> Result<u32, ()> {
+    // ---------------- [1] 加载全局配置 ----------------
+    let config = match CONFIG_MAP.get(0) {
+        Some(c) => c,
+        None => {
+            info!(ctx, "Drop: CONFIG_MAP is empty");
+            return Err(());
+        }
+    };
+
     let vip = config.vip;
     let lip = config.lip;
     let ring_size = config.ring_size;
     let hash_seed = config.hash_seed;
 
     if ring_size == 0 || ring_size > MAX_RING_SIZE {
+        info!(ctx, "Drop: Invalid ring_size ({})", ring_size);
         return Err(());
     }
 
-    let eth = ptr_at_mut::<EthHdr>(&ctx, 0)?;
-    let ether_type = unsafe { core::ptr::addr_of!(eth.ether_type).read_unaligned() };
-    if ether_type != EtherType::Ipv4 {
+    // ---------------- [2] 解析 Ethernet 头 ----------------
+    let eth = match ptr_at_mut::<EthHdr>(ctx, 0) {
+        Ok(e) => e,
+        Err(_) => {
+            info!(ctx, "Drop: Packet too small for EthHdr");
+            return Err(());
+        }
+    };
+
+    // 🌟 核心修复：强制转为主机序后再判断
+    let ether_type =
+        u16::from_be(unsafe { core::ptr::addr_of!(eth.ether_type).read_unaligned() } as u16);
+
+    if ether_type != 0x0800 {
+        // 0x0800 是 IPv4 的以太网类型
+        if ether_type == 0x0806 {
+            info!(ctx, "Pass: ARP Request detected (0x0806)");
+        } else if ether_type == 0x86DD {
+            info!(ctx, "Pass: IPv6 Packet detected (0x86DD)");
+        }
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let ipv4 = ptr_at_mut::<Ipv4Hdr>(&ctx, EthHdr::LEN)?;
-    if ipv4.proto != IpProto::Udp {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    let udp = ptr_at_mut::<UdpHdr>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
+    // ---------------- [3] 解析 IPv4 头 ----------------
+    let ipv4 = match ptr_at_mut::<Ipv4Hdr>(ctx, EthHdr::LEN) {
+        Ok(ip) => ip,
+        Err(_) => {
+            info!(ctx, "Drop: Packet too small for Ipv4Hdr");
+            return Err(());
+        }
+    };
 
     let src_ip = ipv4.src_addr;
     let dst_ip = ipv4.dst_addr;
+
+    info!(
+        ctx,
+        "IPv4: proto={}, SRC=0x{:x}, DST=0x{:x}",
+        ipv4.proto as u8,
+        u32::from_be(src_ip),
+        u32::from_be(dst_ip)
+    );
+
+    if ipv4.proto != IpProto::Udp {
+        info!(ctx, "Pass: Not UDP (proto={})", ipv4.proto as u8);
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // ---------------- [4] 解析 UDP 头 ----------------
+    let udp = match ptr_at_mut::<UdpHdr>(ctx, EthHdr::LEN + Ipv4Hdr::LEN) {
+        Ok(u) => u,
+        Err(_) => {
+            info!(ctx, "Drop: Packet too small for UdpHdr");
+            return Err(());
+        }
+    };
+
     let src_port = udp.source;
     let dst_port = udp.dest;
 
-    //TODO: 添加DSR功能（通过配置文件选择），这里实现的是Full NAT
+    info!(
+        ctx,
+        "📦 UDP: SRC_PORT={}, DST_PORT={}",
+        u16::from_be(src_port),
+        u16::from_be(dst_port)
+    );
+
+    let lb_mac = eth.dst_addr;
+    // ---------------- [5] 核心路由逻辑 ----------------
     if dst_ip == vip {
+        info!(ctx, "[FWD] Match VIP! Entering Forwarding path...");
+
         let fwd_key = FlowKey {
             ip: src_ip,
             port: src_port,
@@ -84,10 +144,19 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
 
         let backend = unsafe {
             if let Some(cached) = CONNTRACK_FORWARD.get(&fwd_key) {
+                info!(
+                    ctx,
+                    "🔗 [FWD] Conntrack Hit: Routing to RS 0x{:x}",
+                    u32::from_be(cached.target_ip)
+                );
                 *cached
             } else {
                 let hash = calculate_hash(u32::from_be(src_ip), u16::from_be(src_port), hash_seed);
                 let slot = hash % ring_size;
+
+                if slot >= MAX_RING_SIZE {
+                    return Err(());
+                }
 
                 let rs = RING_LOOKUP_TABLE.get(slot).ok_or(())?;
                 let new_value = FlowValue {
@@ -96,7 +165,13 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
                     target_mac: rs.mac,
                 };
 
-                // 写入正向表
+                info!(
+                    ctx,
+                    "🎲 [FWD] New Session. Hash slot {}, Selected RS 0x{:x}",
+                    slot,
+                    u32::from_be(rs.ip)
+                );
+
                 let _ = CONNTRACK_FORWARD.insert(&fwd_key, &new_value, 0);
 
                 let mut client_mac = [0u8; 6];
@@ -107,7 +182,6 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
                 client_mac[4] = eth.src_addr[4];
                 client_mac[5] = eth.src_addr[5];
 
-                // 写入反向表
                 let rev_key = FlowKey {
                     ip: rs.ip,
                     port: rs.port,
@@ -116,7 +190,7 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
                 let rev_value = FlowValue {
                     target_ip: src_ip,
                     target_port: src_port,
-                    target_mac: client_mac, // 记录客户端/网关MAC地址，回向包时直接使用
+                    target_mac: client_mac,
                 };
                 let _ = CONNTRACE_REVERSE.insert(&rev_key, &rev_value, 0);
 
@@ -124,11 +198,12 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
             }
         };
 
-        // 修改包头
         ipv4.src_addr = lip;
         ipv4.dst_addr = backend.target_ip;
-        udp.source = src_port; //TODO: 这里是简易实现：直接复用源端口作为Port，实际可能存在冲突，可以改成一个端口池
+        udp.source = src_port;
         udp.dest = backend.target_port;
+
+        eth.src_addr = lb_mac;
 
         eth.dst_addr[0] = backend.target_mac[0];
         eth.dst_addr[1] = backend.target_mac[1];
@@ -137,14 +212,15 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         eth.dst_addr[4] = backend.target_mac[4];
         eth.dst_addr[5] = backend.target_mac[5];
 
-        // 重新计算校验和
         ipv4.check = 0;
         ipv4.check = compute_ipv4_checksum(ipv4);
         udp.check = 0;
 
+        info!(ctx, "[FWD] Packet rewritten! Sending XDP_TX...");
         return Ok(xdp_action::XDP_TX);
     } else if dst_ip == lip {
-        // RS发出的回向包
+        info!(ctx, "[REV] Match LIP! Entering Reverse path...");
+
         let rev_key = FlowKey {
             ip: src_ip,
             port: src_port,
@@ -152,11 +228,18 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
         };
 
         if let Some(orig_flow) = unsafe { CONNTRACE_REVERSE.get(&rev_key) } {
-            // 修改包头
+            info!(
+                ctx,
+                "[REV] Conntrack Hit: Restoring client 0x{:x}",
+                u32::from_be(orig_flow.target_ip)
+            );
+
             ipv4.src_addr = vip;
             ipv4.dst_addr = orig_flow.target_ip;
-            udp.source = dst_port;
+            udp.source = src_port;
             udp.dest = orig_flow.target_port;
+
+            eth.src_addr = lb_mac;
 
             eth.dst_addr[0] = orig_flow.target_mac[0];
             eth.dst_addr[1] = orig_flow.target_mac[1];
@@ -169,19 +252,26 @@ fn try_xdp_fullnat_lb(ctx: XdpContext) -> Result<u32, ()> {
             ipv4.check = compute_ipv4_checksum(ipv4);
             udp.check = 0;
 
+            info!(ctx, "[REV] Packet restored! Sending XDP_TX...");
             return Ok(xdp_action::XDP_TX);
+        } else {
+            info!(ctx, "[REV] Conntrack Miss! Dropping packet.");
         }
+    } else {
+        info!(
+            ctx,
+            "Pass: DST_IP (0x{:x}) is neither VIP nor LIP",
+            u32::from_be(dst_ip)
+        );
     }
+
     Ok(xdp_action::XDP_PASS)
 }
 
-// Jenkins Hash(动态加密)
 #[inline(always)]
 fn calculate_hash(ip: u32, port: u16, seed: u32) -> u32 {
     let jh_magic = 0xdeadbeefu32;
-    let length = 6u32; //IP(4) + Port(2) = 6字节
-
-    // 初始化内部状态
+    let length = 6u32;
     let mut a = ip
         .wrapping_add(jh_magic)
         .wrapping_add(length)
@@ -191,8 +281,6 @@ fn calculate_hash(ip: u32, port: u16, seed: u32) -> u32 {
         .wrapping_add(length)
         .wrapping_add(seed);
     let mut c = jh_magic.wrapping_add(length).wrapping_add(seed);
-
-    // Jenkins 原生的核心混淆宏 (mix)
     c ^= b;
     c = c.wrapping_sub(b.rotate_left(14));
     a ^= c;
@@ -207,7 +295,6 @@ fn calculate_hash(ip: u32, port: u16, seed: u32) -> u32 {
     b = b.wrapping_sub(a.rotate_left(14));
     c ^= b;
     c = c.wrapping_sub(b.rotate_left(24));
-
     c
 }
 

@@ -6,13 +6,14 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-echo "清理旧的 Namespace 和网桥..."
+echo "清理旧的 Namespace、网桥以及残留测试进程..."
 ip netns del ns-client 2>/dev/null
 ip netns del ns-lb 2>/dev/null
 ip netns del ns-rs1 2>/dev/null
 ip netns del ns-rs2 2>/dev/null
 ip link del br0 2>/dev/null
-rm -rf /tmp/nginx-test 2>/dev/null
+pkill -f mock_rs.py 2>/dev/null # 清理旧的 Python 后端进程
+rm -rf /tmp/nginx-test /tmp/mock_rs.py 2>/dev/null
 
 echo "1. 创建虚拟网桥 br0..."
 ip link add br0 type bridge
@@ -75,43 +76,42 @@ ip netns exec ns-client ip route add default via 10.0.0.1 dev eth0
 ip netns exec ns-rs1 ip route add default via 192.168.1.254 dev eth0
 ip netns exec ns-rs2 ip route add default via 192.168.1.254 dev eth0
 
-echo "6. 启动 Nginx 作为支持 UDP 的后端服务器..."
-mkdir -p /tmp/nginx-test
+echo "6. 动态生成并启动 Python UDP 模拟服务器..."
+# 生成通用 Python 脚本，接收服务名和 IP 作为参数，模拟原 Nginx 的返回
+cat << 'EOF' > /tmp/mock_rs.py
+import socket
+import sys
 
-# 生成 RS1 的 Nginx UDP 测试配置
-cat << 'EOF' > /tmp/nginx-test/rs1.conf
-error_log /tmp/nginx-test/error_rs1.log info;
-pid /tmp/nginx-test/rs1.pid;
-events { worker_connections 1024; }
-stream {
-    server {
-        listen 8080 udp;
-        return "Hello from Nginx Real Server 1 (192.168.1.10)\n";
-    }
-}
+server_name = sys.argv[1]
+ip_addr = sys.argv[2]
+
+# 创建 UDP 套接字并绑定端口
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('0.0.0.0', 8080))
+
+while True:
+    try:
+        # 接收数据
+        data, addr = sock.recvfrom(1024)
+        # 拼接回包信息，严格匹配原 nginx 格式防止 test_lb.sh 挂掉
+        msg = f"Hello from Nginx {server_name} ({ip_addr})\n"
+        # 回包给客户端
+        sock.sendto(msg.encode('utf-8'), addr)
+    except Exception:
+        pass
 EOF
 
-# 生成 RS2 的 Nginx UDP 测试配置
-cat << 'EOF' > /tmp/nginx-test/rs2.conf
-error_log /tmp/nginx-test/error_rs2.log info;
-pid /tmp/nginx-test/rs2.pid;
-events { worker_connections 1024; }
-stream {
-    server {
-        listen 8080 udp;
-        return "Hello from Nginx Real Server 2 (192.168.1.11)\n";
-    }
-}
-EOF
+# 在各自的 Namespace 中以后台进程异步启动 Python 服务器
+ip netns exec ns-rs1 python3 /tmp/mock_rs.py "Real Server 1" "192.168.1.10" &
+ip netns exec ns-rs2 python3 /tmp/mock_rs.py "Real Server 2" "192.168.1.11" &
 
-# 在各自的 Namespace 中以 root 身份独立启动 Nginx
-ip netns exec ns-rs1 nginx -c /tmp/nginx-test/rs1.conf
-ip netns exec ns-rs2 nginx -c /tmp/nginx-test/rs2.conf
+# 稍微等待确保端口绑定成功
+sleep 1
 
 echo "--------------------------------------------------------"
 echo "🎉 测试环境创建成功！"
 echo "Client 节点  -> Namespace: ns-client | IP: 10.0.0.5"
-echo "LB 负载均衡  -> Namespace: ns-lb     | VIP: 10.0.0.1, LIP: 10.0.0.254 (网卡: eth0)"
-echo "RS1 服务器   -> Namespace: ns-rs1    | IP: 192.168.1.10, MAC: 00:11:22:33:44:55"
-echo "RS2 服务器   -> Namespace: ns-rs2    | IP: 192.168.1.11, MAC: 00:11:22:33:44:66"
+echo "LB 负载均衡  -> Namespace: ns-lb     | VIP: 10.0.0.1, LIP: 10.0.0.254"
+echo "RS1 服务器   -> Namespace: ns-rs1    | IP: 192.168.1.10 (Python UDP 8080 监听中)"
+echo "RS2 服务器   -> Namespace: ns-rs2    | IP: 192.168.1.11 (Python UDP 8080 监听中)"
 echo "--------------------------------------------------------"

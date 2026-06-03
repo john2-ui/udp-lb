@@ -40,7 +40,7 @@ sudo pkill -f "./target/release/udp-lb" 2>/dev/null
 
 echo "--> 正在 ns-lb 命名空间中启动 eBPF 负载均衡器..."
 # 在 ns-lb 内部后台启动程序，日志输出到临时文件
-ip netns exec ns-lb $LB_BIN > $LB_LOG 2>&1 &
+ip netns exec ns-lb env RUST_LOG=info $LB_BIN > $LB_LOG 2>&1 &
 LB_PID=$!
 
 # 设置退出钩子：确保脚本不管由于什么原因崩溃或退出，都能把后台的 LB 进程杀掉，防止内核 XDP 残留
