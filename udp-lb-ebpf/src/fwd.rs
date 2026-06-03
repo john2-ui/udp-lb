@@ -1,4 +1,4 @@
-use aya_ebpf::{bindings::xdp_action, programs::XdpContext};
+use aya_ebpf::{bindings::xdp_action, helpers::bpf_ktime_get_ns, programs::XdpContext};
 use aya_log_ebpf::info;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 use udp_lb_common::{FlowKey, FlowValue, LbConfig};
@@ -16,7 +16,7 @@ pub fn handle_fwd_traffic(
     udp: &mut UdpHdr,
     config: &LbConfig,
 ) -> Result<u32, ()> {
-    info!(ctx, "🎯 [FWD] Match VIP! Entering Forwarding path...");
+    info!(ctx, "[FWD] Match VIP! Entering Forwarding path...");
 
     let src_ip = ipv4.src_addr;
     let src_port = udp.source;
@@ -29,12 +29,15 @@ pub fn handle_fwd_traffic(
     };
 
     let backend = unsafe {
-        if let Some(cached) = CONNTRACK_FORWARD.get(&fwd_key) {
+        let current_time = bpf_ktime_get_ns();
+
+        if let Some(cached) = CONNTRACK_FORWARD.get_ptr_mut(&fwd_key) {
             info!(
                 ctx,
-                "🔗 [FWD] Conntrack Hit: Routing to RS 0x{:x}",
-                u32::from_be(cached.target_ip)
+                "[FWD] Conntrack Hit: Routing to RS 0x{:x}",
+                u32::from_be((*cached).target_ip)
             );
+            (*cached).last_active = current_time;
             *cached
         } else {
             let safe_ring_size = if config.ring_size > 0 {
@@ -59,11 +62,12 @@ pub fn handle_fwd_traffic(
                 target_ip: rs.ip,
                 target_port: rs.port,
                 target_mac: rs.mac,
+                last_active: current_time,
             };
 
             info!(
                 ctx,
-                "🎲 [FWD] New Session. Hash slot {}, Selected RS 0x{:x}",
+                "[FWD] New Session. Hash slot {}, Selected RS 0x{:x}",
                 slot,
                 u32::from_be(rs.ip)
             );
@@ -80,6 +84,7 @@ pub fn handle_fwd_traffic(
                 target_ip: src_ip,
                 target_port: src_port,
                 target_mac: client_mac,
+                last_active: current_time,
             };
             let _ = CONNTRACE_REVERSE.insert(&rev_key, &rev_value, 0);
 

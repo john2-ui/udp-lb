@@ -4,7 +4,7 @@
 */
 use std::time::Duration;
 
-use tokio::time;
+use tokio::{net::UdpSocket, time};
 
 use crate::config::BackendConfig;
 
@@ -12,16 +12,39 @@ pub async fn start_health_check_loop(backends: Vec<BackendConfig>) {
     log::info!("Starting asynchronous health check task...");
 
     tokio::spawn(async move {
+        // 每 5 秒进行一轮全量探测
         let mut interval = time::interval(Duration::from_secs(5));
+
         loop {
             interval.tick().await;
 
-            // TODO: 实现针对 backends 的端口连通性探测
-            // 如果探测到状态变动 (Up -> Down)，触发 ring.rs 重新计算并下发 eBPF
-            log::debug!(
-                "Health check tick: validating {} backends...",
-                backends.len()
-            );
+            for backend in &backends {
+                let addr = format!("{}:{}", backend.ip, backend.port);
+
+                // 绑定本地随机端口
+                match UdpSocket::bind("0.0.0.0:0").await {
+                    Ok(socket) => {
+                        // 发送探针数据 (Payload)
+                        if socket.connect(&addr).await.is_ok() {
+                            let _ = socket.send(b"PING").await;
+
+                            // 设置 1 秒的接收超时时间
+                            let mut buf = [0u8; 1024];
+                            let check_result =
+                                time::timeout(Duration::from_secs(1), socket.recv(&mut buf)).await;
+
+                            match check_result {
+                                Ok(Ok(_)) => log::debug!("Health Check: RS {} is UP", addr),
+                                _ => log::warn!(
+                                    "Health Check: RS {} is DOWN (Timeout/Unreachable)",
+                                    addr
+                                ),
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("Health check socket bind failed: {}", e),
+                }
+            }
         }
     });
 }

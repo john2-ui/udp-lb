@@ -27,7 +27,12 @@ pub fn handle_rev_traffic(
     };
 
     // 查找反向会话表
-    if let Some(orig_flow) = unsafe { CONNTRACE_REVERSE.get(&rev_key) } {
+    if let Some(orig_flow_ptr) = CONNTRACE_REVERSE.get_ptr_mut(&rev_key) {
+        let orig_flow = unsafe {
+            (*orig_flow_ptr).last_active = aya_ebpf::helpers::bpf_ktime_get_ns();
+            *orig_flow_ptr
+        };
+
         info!(
             ctx,
             "[REV] Conntrack Hit: Restoring client 0x{:x}",

@@ -24,6 +24,9 @@ pub struct FlowKey {
     pub _pad: [u8; 2], //填充到4字节对齐
 }
 
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for FlowKey {}
+
 // 连接追踪的 Value
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -31,7 +34,11 @@ pub struct FlowValue {
     pub target_ip: u32,
     pub target_port: u16,
     pub target_mac: [u8; 6],
+    pub last_active: u64, //记录最后一次活跃的内核启动时间(纳秒)
 }
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for FlowValue {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]

@@ -7,12 +7,12 @@ use std::{net::Ipv4Addr, str::FromStr};
 
 use anyhow::{Context, Result};
 use aya::{
-    maps::Array,
+    maps::{Array, HashMap},
     programs::{Xdp, XdpMode},
 };
 use rand::Rng;
 use tokio::signal;
-use udp_lb_common::LbConfig;
+use udp_lb_common::{FlowKey, FlowValue, LbConfig};
 
 use crate::{
     config::{PodLbConfig, load_config},
@@ -87,8 +87,16 @@ async fn main() -> Result<()> {
     populate_ring(&mut ring_map, &app_config.backends, app_config.ring_size)?;
 
     // 8. 启动异步管控协程
+    let fwd_map: HashMap<_, FlowKey, FlowValue> = HashMap::try_from(
+        bpf.take_map("CONNTRACK_FORWARD")
+            .context("Failed to take FWD map")?,
+    )?;
+    let rev_map: HashMap<_, FlowKey, FlowValue> = HashMap::try_from(
+        bpf.take_map("CONNTRACE_REVERSE")
+            .context("Failed to take REV map")?,
+    )?;
     health::start_health_check_loop(app_config.backends.clone()).await;
-    conntrack::start_gc_loop().await;
+    conntrack::start_gc_loop(fwd_map, rev_map).await;
 
     // 9. 挂起并等待退出信号
     log::info!("Load Balancer is fully active. Waiting for Ctrl-C...");
