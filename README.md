@@ -1,5 +1,9 @@
 # UDP 负载均衡器
 
+## 项目环境
+
+ubuntu 26.04 64位
+
 ## 构建项目
 
 ```bash
@@ -31,6 +35,8 @@ cargo build --release
 ```bash
 sudo ./setup_env.sh
 ```
+![setup env result](./env.png "setup env 成功结果")
+
 
 测试lb是否起作用
 
@@ -38,4 +44,17 @@ sudo ./setup_env.sh
 sudo ./test_lb.sh
 ```
 
-<!-- TODO: 性能测试 -->
+![test lb result](./test_result.png "lb成功转发结果")
+
+测试lb与linux内核协议栈的延迟
+
+```bash
+sudo ./benchmark_latency.sh
+```
+
+![benchmark result](./benchmark_result.png "性能测试结果")
+
+
+## 项目实验报告
+
+根目录下《基于Xdp实现的udp负载均衡器》实验报告.pdf
