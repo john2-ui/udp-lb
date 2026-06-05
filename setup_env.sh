@@ -109,7 +109,7 @@ ip netns exec ns-rs2 python3 /tmp/mock_rs.py "Real Server 2" "192.168.1.11" &
 sleep 1
 
 echo "--------------------------------------------------------"
-echo "🎉 测试环境创建成功！"
+echo "测试环境创建成功！"
 echo "Client 节点  -> Namespace: ns-client | IP: 10.0.0.5"
 echo "LB 负载均衡  -> Namespace: ns-lb     | VIP: 10.0.0.1, LIP: 10.0.0.254"
 echo "RS1 服务器   -> Namespace: ns-rs1    | IP: 192.168.1.10 (Python UDP 8080 监听中)"
